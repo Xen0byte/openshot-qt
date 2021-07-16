@@ -59,7 +59,6 @@ App.controller("TimelineCtrl", function ($scope) {
   $scope.playhead_animating = false;
   $scope.playhead_height = 300;
   $scope.playheadTime = secondsToTime($scope.project.playhead_position, $scope.project.fps.num, $scope.project.fps.den);
-  $scope.shift_pressed = false;
   $scope.snapline_position = 0.0;
   $scope.snapline = false;
   $scope.enable_snapping = true;
@@ -107,11 +106,6 @@ App.controller("TimelineCtrl", function ($scope) {
     // Determine seconds
     var frames_per_second = $scope.project.fps.num / $scope.project.fps.den;
     var position_seconds = ((position_frames - 1) / frames_per_second);
-
-    // Center on the playhead if it has moved out of view and the timeline should follow it
-    if ($scope.enable_playhead_follow && !$scope.isTimeVisible(position_seconds)) {
-      $scope.centerOnTime(position_seconds);
-    }
 
     // Update internal scope (in seconds)
     $scope.movePlayhead(position_seconds);
@@ -280,11 +274,20 @@ App.controller("TimelineCtrl", function ($scope) {
     });
 
     // Scroll back to correct cursor time (minus the difference of the cursor location)
-    var new_cursor_x = Math.round((cursor_time * $scope.pixelsPerSecond) - center_x);
+    var new_cursor_x = Math.max(0, Math.round((cursor_time * $scope.pixelsPerSecond) - center_x));
+    scrolling_tracks.scrollLeft(new_cursor_x + 1); // force scroll event
     scrolling_tracks.scrollLeft(new_cursor_x);
   };
 
-  // Scroll the timeline horizontally of a certain amount (scrol_value)
+  // Change the scale and apply to scope
+  $scope.setScroll = function (normalizedScrollValue) {
+    var timeline_length = Math.min(32767, $scope.getTimelineWidth(0));
+    var scrolling_tracks = $("#scrolling_tracks");
+    var horz_scroll_offset = normalizedScrollValue * timeline_length;
+    scrolling_tracks.scrollLeft(horz_scroll_offset);
+  };
+
+  // Scroll the timeline horizontally of a certain amount
   $scope.scrollLeft = function (scroll_value) {
     var scrolling_tracks = $("#scrolling_tracks");
     var horz_scroll_offset = scrolling_tracks.scrollLeft();
@@ -949,22 +952,20 @@ App.controller("TimelineCtrl", function ($scope) {
     var scrolling_tracks = $("#scrolling_tracks");
     var vert_scroll_offset = scrolling_tracks.scrollTop();
 
-    $scope.$apply(function () {
-      // Loop through each layer
-      for (var layer_index = 0; layer_index < $scope.project.layers.length; layer_index++) {
-        var layer = $scope.project.layers[layer_index];
+    // Loop through each layer
+    for (var layer_index = 0; layer_index < $scope.project.layers.length; layer_index++) {
+      var layer = $scope.project.layers[layer_index];
 
-        // Find element on screen (bound to this layer)
-        var layer_elem = $("#track_" + layer.number);
-        if (layer_elem.offset()) {
-          // Update the top offset
-          layer.y = layer_elem.offset().top + vert_scroll_offset;
-        }
+      // Find element on screen (bound to this layer)
+      var layer_elem = $("#track_" + layer.number);
+      if (layer_elem.offset()) {
+        // Update the top offset
+        layer.y = layer_elem.offset().top + vert_scroll_offset;
       }
-      // Update playhead height
-      $scope.playhead_height = $("#track-container").height();
-      $(".playhead-line").height($scope.playhead_height);
-    });
+    }
+    // Update playhead height
+    $scope.playhead_height = $("#track-container").height();
+    $(".playhead-line").height($scope.playhead_height);
   };
 
   // Sort clips and transitions by position
@@ -1084,7 +1085,7 @@ App.controller("TimelineCtrl", function ($scope) {
   };
 
   // Search through clips and transitions to find the closest element within a given threshold
-  $scope.getNearbyPosition = function (pixel_positions, threshold, ignore_ids) {
+  $scope.getNearbyPosition = function (pixel_positions, threshold, ignore_ids={}) {
     // init some vars
     var smallest_diff = 900.0;
     var smallest_abs_diff = 900.0;
@@ -1106,8 +1107,18 @@ App.controller("TimelineCtrl", function ($scope) {
           continue;
         }
 
-        diffs.push({"diff": position - clip_left_position, "position": clip_left_position}, // left side of clip
-          {"diff": position - clip_right_position, "position": clip_right_position}); // right side of clip
+        // left side of clip
+        let left_edge_diff = position - clip_left_position;
+        if (Math.abs(left_edge_diff) <= threshold) {
+          diffs.push({"diff": left_edge_diff, "position": clip_left_position, "id": clip.id, "side": "left"});
+        }
+
+        // right side of clip
+        let right_edge_diff = position - clip_right_position;
+        if (Math.abs(right_edge_diff) <= threshold) {
+          diffs.push({"diff": right_edge_diff, "position": clip_right_position, "id": clip.id, "side": "right"});
+        }
+
       }
 
       // Add transition positions to array
@@ -1122,8 +1133,18 @@ App.controller("TimelineCtrl", function ($scope) {
           continue;
         }
 
-        diffs.push({"diff": position - tran_left_position, "position": tran_left_position}, // left side of transition
-          {"diff": position - tran_right_position, "position": tran_right_position}); // right side of transition
+        // left side of transition
+        let left_edge_diff = position - tran_left_position;
+        if (Math.abs(left_edge_diff) <= threshold) {
+          diffs.push({"diff": left_edge_diff, "position": tran_left_position});
+        }
+
+        // right side of transition
+        let right_edge_diff = position - tran_right_position;
+        if (Math.abs(right_edge_diff) <= threshold) {
+          diffs.push({"diff": right_edge_diff, "position": tran_right_position});
+        }
+
       }
 
       // Add marker positions to array
@@ -1131,14 +1152,21 @@ App.controller("TimelineCtrl", function ($scope) {
         var marker = $scope.project.markers[index];
         var marker_position = marker.position * $scope.pixelsPerSecond;
 
-        diffs.push({"diff": position - marker_position, "position": marker_position}, // left side of marker
-          {"diff": position - marker_position, "position": marker_position}); // right side of marker
+        // marker position
+        let left_edge_diff = position - marker_position;
+        if (Math.abs(left_edge_diff) <= threshold) {
+          diffs.push({"diff": left_edge_diff, "position": marker_position});
+        }
       }
 
       // Add playhead position to array
       var playhead_pixel_position = $scope.project.playhead_position * $scope.pixelsPerSecond;
       var playhead_diff = position - playhead_pixel_position;
-      diffs.push({"diff": playhead_diff, "position": playhead_pixel_position});
+      if (!ignore_ids.hasOwnProperty("ruler") && !ignore_ids.hasOwnProperty("playhead")) {
+        if (Math.abs(playhead_diff) <= threshold) {
+          diffs.push({"diff": playhead_diff, "position": playhead_pixel_position});
+        }
+      }
 
       // Loop through diffs (and find the smallest one)
       for (var diff_index = 0; diff_index < diffs.length; diff_index++) {
@@ -1147,7 +1175,7 @@ App.controller("TimelineCtrl", function ($scope) {
         var abs_diff = Math.abs(diff);
 
         // Check if this clip is nearby
-        if (abs_diff < smallest_abs_diff && abs_diff <= threshold) {
+        if (abs_diff < smallest_abs_diff && abs_diff <= threshold && diff_position) {
           // This one is smaller
           smallest_diff = diff;
           smallest_abs_diff = abs_diff;
@@ -1389,6 +1417,9 @@ App.controller("TimelineCtrl", function ($scope) {
 
     // Re-index Layer Y values
     $scope.updateLayerIndex();
+
+    // Force a scroll event (from 1 to 0, to send the geometry to zoom slider)
+    $("#scrolling_tracks").scrollLeft(1);
 
     // Scroll to top/left when loading a project
     $("#scrolling_tracks").animate({
